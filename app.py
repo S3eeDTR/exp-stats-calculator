@@ -19,7 +19,7 @@ app.config.update(
     UPLOAD_FOLDER=UPLOAD_DIR
 )
 
-# ─── Pixel‐perfect boxes ────────────────────────────────────────────────────────
+# ─── Pixel‐perfect boxes for nickname & EXP ────────────────────────────────────
 ROW_BOXES = [
     {"nickname": (695, 580, 785, 604), "exp": (932, 575, 991, 610)},
     {"nickname": (695, 615, 785, 643), "exp": (932, 613, 991, 643)},
@@ -38,7 +38,6 @@ def safe_ocr_from_image(pil_img: Image.Image):
     buf = io.BytesIO()
     pil_img.save(buf, format="JPEG")
     buf.seek(0)
-
     try:
         resp = requests.post(
             OCR_API_URL,
@@ -49,43 +48,43 @@ def safe_ocr_from_image(pil_img: Image.Image):
         resp.raise_for_status()
         return resp.json()
     except Exception as e:
-        # Log but swallow the exception
         print(f"❌ OCR API failed: {e}")
         return []
 
-# ─── Aggregator (no time, default fields) ──────────────────────────────────────
 class PlayerDataAggregator:
     def __init__(self):
-        self.players = {}
-        self.processed_images = []
+        self.players = {}          # nickname → aggregated stats
+        self.processed_images = [] # per-image details
 
     def add_image_data(self, filename, players_data):
+        # record per-image result
         self.processed_images.append({
             "filename":     filename,
             "players":      players_data,
             "player_count": len(players_data)
         })
+        # update aggregates
         for p in players_data:
             nick = p["nickname"]
             exp  = p["exp"]
             if nick in self.players:
-                e = self.players[nick]
-                e["totalEXP"]    += exp
-                e["appearances"] += 1
-                e["images"].append(filename)
+                entry = self.players[nick]
+                entry["totalEXP"]    += exp
+                entry["appearances"] += 1
+                entry["images"].append(filename)
             else:
                 self.players[nick] = {
                     "nickname":      nick,
                     "totalEXP":      exp,
                     "appearances":   1,
-                    "bestTime":      "",
-                    "timeOverCount": 0,
+                    "bestTime":      "",   # no time data
+                    "timeOverCount": 0,    # no time‑over
                     "images":        [filename]
                 }
 
     def get_aggregated_data(self):
-        lst        = list(self.players.values())
-        total_exp  = sum(p["totalEXP"] for p in lst)
+        lst       = list(self.players.values())
+        total_exp = sum(p["totalEXP"] for p in lst)
         return {
             "players": lst,
             "statistics": {
@@ -97,7 +96,6 @@ class PlayerDataAggregator:
             "processed_images": self.processed_images
         }
 
-# ─── Routes ───────────────────────────────────────────────────────────────────
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -126,20 +124,20 @@ def process_images():
             players_data = []
 
             for idx, boxes in enumerate(ROW_BOXES, start=1):
-                # OCR nickname
+                # OCR nickname (no fallback)
                 nick_crop = img.crop(boxes["nickname"])
                 nick_json = safe_ocr_from_image(nick_crop)
                 nick_txt  = next(
                     (it["txt"].strip() for it in nick_json if it["txt"].strip()),
-                    f"runner{idx}"
+                    ""
                 )
 
                 # OCR EXP
-                exp_crop     = img.crop(boxes["exp"])
-                exp_json     = safe_ocr_from_image(exp_crop)
-                raw_exp_txt  = next(
-                    (it["txt"].replace(",", "")
-                     for it in exp_json if it["txt"].strip().isdigit()),
+                exp_crop    = img.crop(boxes["exp"])
+                exp_json    = safe_ocr_from_image(exp_crop)
+                raw_exp_txt = next(
+                    (it["txt"].replace(",", "") for it in exp_json
+                     if it["txt"].strip().isdigit()),
                     "0"
                 )
                 # strip first 5 digits if >10 length
@@ -147,15 +145,16 @@ def process_images():
                     raw_exp_txt = raw_exp_txt[5:]
                 exp_val = int(raw_exp_txt)
 
-                players_data.append({
-                    "nickname": nick_txt,
-                    "exp":      exp_val
-                })
+                # only include rows with a real nickname and exp > 0
+                if nick_txt and exp_val > 0:
+                    players_data.append({
+                        "nickname": nick_txt,
+                        "exp":      exp_val
+                    })
 
             agg.add_image_data(fname, players_data)
 
         except Exception as e:
-            # in case something really bad happens here
             print(f"❌ Processing failed for {fname}: {e}")
             agg.processed_images.append({
                 "filename":     fname,
