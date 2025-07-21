@@ -77,8 +77,8 @@ class PlayerDataAggregator:
                     "nickname":      nick,
                     "totalEXP":      exp,
                     "appearances":   1,
-                    "bestTime":      "",   # no time data
-                    "timeOverCount": 0,    # no time‑over
+                    "bestTime":      "",
+                    "timeOverCount": 0,
                     "images":        [filename]
                 }
 
@@ -105,12 +105,9 @@ def process_images():
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
-    if "images" not in request.files:
-        return jsonify({"error": "No images provided"}), 400
-
     files = request.files.getlist("images")
     if not files or all(f.filename == "" for f in files):
-        return jsonify({"error": "No images selected"}), 400
+        return jsonify({"error": "No images provided"}), 400
 
     agg = PlayerDataAggregator()
 
@@ -124,20 +121,12 @@ def process_images():
             players_data = []
 
             for idx, boxes in enumerate(ROW_BOXES, start=1):
-                # OCR nickname (no fallback)
-                nick_crop = img.crop(boxes["nickname"])
-                nick_json = safe_ocr_from_image(nick_crop)
-                nick_txt  = next(
-                    (it["txt"].strip() for it in nick_json if it["txt"].strip()),
-                    ""
-                )
-
-                # OCR EXP
+                # 1) OCR EXP first
                 exp_crop    = img.crop(boxes["exp"])
                 exp_json    = safe_ocr_from_image(exp_crop)
                 raw_exp_txt = next(
-                    (it["txt"].replace(",", "") for it in exp_json
-                     if it["txt"].strip().isdigit()),
+                    (it["txt"].replace(",", "")
+                     for it in exp_json if it["txt"].strip().isdigit()),
                     "0"
                 )
                 # strip first 5 digits if >10 length
@@ -145,8 +134,30 @@ def process_images():
                     raw_exp_txt = raw_exp_txt[5:]
                 exp_val = int(raw_exp_txt)
 
-                # only include rows with a real nickname and exp > 0
-                if nick_txt and exp_val > 0:
+                # only proceed if we detected EXP > 0
+                if exp_val <= 0:
+                    continue
+
+                # 2) OCR nickname
+                nick_crop = img.crop(boxes["nickname"])
+                nick_json = safe_ocr_from_image(nick_crop)
+                nick_txt  = next(
+                    (it["txt"].strip() for it in nick_json if it["txt"].strip()),
+                    ""
+                )
+
+                # 3) if nickname empty, enlarge crop and retry once
+                if not nick_txt:
+                    w, h       = nick_crop.size
+                    enlarged   = nick_crop.resize((w * 2, h * 2), Image.LANCZOS)
+                    nick_json2 = safe_ocr_from_image(enlarged)
+                    nick_txt   = next(
+                        (it["txt"].strip() for it in nick_json2 if it["txt"].strip()),
+                        ""
+                    )
+
+                # only include if we now have a nickname
+                if nick_txt:
                     players_data.append({
                         "nickname": nick_txt,
                         "exp":      exp_val
