@@ -14,7 +14,7 @@ export const processImages = async (files: File[]): Promise<{
     });
 
     console.log('Sending request to Flask server...');
-    const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const BACKEND = import.meta.env.VITE_BACKEND_URL || 'https://exp-stats-calculator.onrender.com';
     const response = await fetch(`${BACKEND}/process`, {
       method: 'POST',
       body: formData,
