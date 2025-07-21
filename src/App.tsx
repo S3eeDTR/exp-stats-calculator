@@ -319,6 +319,7 @@ function App() {
                 <h3 className="text-lg font-bold text-white mb-3">How to Use - Cumulative Tracking</h3>
                 <div className="space-y-2 text-blue-200 text-sm">
                   <p>• Upload multiple game screenshot images using the upload area</p>
+                  <p>• Make Sure your picture is 1920x1080 !!!!</p>
                   <p>• <strong>Keep uploading more images</strong> - data accumulates across all upload sessions</p>
                   <p>• The system will automatically extract player data using OCR technology</p>
                   <p>• <strong>Player EXP is summed across ALL images</strong> you've ever uploaded</p>
