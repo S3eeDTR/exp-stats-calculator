@@ -1,5 +1,6 @@
 import os
 import io
+import json
 import tempfile
 from collections import defaultdict
 from flask import Flask, render_template, request, jsonify
@@ -9,12 +10,12 @@ from PIL import Image
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__, template_folder='templates')
-CORS(app)  # add Access-Control-Allow-Origin: * to all routes
+CORS(app)  # Enable CORS for all routes
 
-# Config
+# Configuration
 OCR_API_URL = "https://yolo12138-paddle-ocr-api.hf.space/ocr?lang=en"
-CROP_BOX    = (700, 530, 1000, 870)         # (left, top, right, bottom)
-MAX_SIZE    = 16 * 1024 * 1024              # 16 MB
+CROP_BOX    = (700, 530, 1000, 870)   # (left, top, right, bottom)
+MAX_SIZE    = 16 * 1024 * 1024        # 16 MB
 UPLOAD_DIR  = tempfile.gettempdir()
 ALLOWED_EXTS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}
 
@@ -117,7 +118,6 @@ class PlayerDataAggregator:
 
 @app.route('/')
 def index():
-    # renders templates/index.html
     return render_template('index.html')
 
 @app.route('/process', methods=['POST'])
@@ -130,34 +130,67 @@ def process_images():
         return jsonify({'error':'No images selected'}), 400
 
     agg = PlayerDataAggregator()
-    proc = []
+    resp_list = []
+
     for idx, file in enumerate(files):
-        if file and allowed_file(file.filename):
-            fname = secure_filename(file.filename)
-            path  = os.path.join(UPLOAD_DIR, f"temp_{idx}_{fname}")
-            file.save(path)
-            try:
-                ocr_json    = requests.post(
-                    OCR_API_URL,
-                    headers={'accept':'application/json'},
-                    files={'file':('img.jpg', open(path,'rb'),'image/jpeg')}
-                ).json()
-                data        = extract_table(ocr_json)
-                agg.add_image_data(fname, data)
-                proc.append({'filename':fname,'players':data,'player_count':len(data)})
-            except Exception as e:
-                proc.append({'filename':fname,'error':str(e),'players':[],'player_count':0})
-            finally:
-                os.remove(path)
+        filename = secure_filename(file.filename)
+        path     = os.path.join(UPLOAD_DIR, f"temp_{idx}_{filename}")
+        file.save(path)
+
+        try:
+            # Crop before OCR
+            img = Image.open(path).convert("RGB")
+            cropped = img.crop(CROP_BOX)
+            buf = io.BytesIO()
+            cropped.save(buf, format='JPEG')
+            buf.seek(0)
+
+            # Call OCR API
+            ocr_resp = requests.post(
+                OCR_API_URL,
+                headers={'accept':'application/json'},
+                files={'file': ('cropped.jpg', buf, 'image/jpeg')}
+            )
+            ocr_data = ocr_resp.json()
+
+            # DEBUG: print raw OCR output
+            print(f"\n--- OCR results for {filename} ---")
+            print(json.dumps(ocr_data, indent=2))
+            print("--- end OCR results ---\n")
+
+            # Extract table rows
+            players = extract_table(ocr_data)
+
+            # DEBUG: print extraction result
+            print(f"extract_table found {len(players)} rows for {filename}: {players}\n")
+
+            # Aggregate
+            agg.add_image_data(filename, players)
+            resp_list.append({
+                'filename': filename,
+                'players':  players,
+                'player_count': len(players)
+            })
+
+        except Exception as e:
+            print(f"❌ Error processing {filename}:", e)
+            resp_list.append({
+                'filename': filename,
+                'error':    str(e),
+                'players':  [],
+                'player_count': 0
+            })
+        finally:
+            os.remove(path)
 
     result = agg.get_aggregated_data()
     return jsonify({
-        'success': True,
-        'processed_images':    proc,
-        'aggregated_players':  result['players'],
-        'statistics':          result['statistics'],
-        'total_images':        len(proc),
-        'unique_players':      result['statistics']['unique_players']
+        'success':            True,
+        'processed_images':   resp_list,
+        'aggregated_players': result['players'],
+        'statistics':         result['statistics'],
+        'total_images':       len(resp_list),
+        'unique_players':     result['statistics']['unique_players']
     })
 
 @app.route('/health', methods=['GET'])
@@ -165,6 +198,5 @@ def health_check():
     return jsonify({'status':'healthy'})
 
 if __name__ == '__main__':
-    # for local testing
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=True, host='0.0.0.0', port=port)
