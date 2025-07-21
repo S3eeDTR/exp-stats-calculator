@@ -131,7 +131,7 @@ function App() {
               <TrendingUp className="h-8 w-8 text-white" />
             </div>
             <div>
-              <h1 className="text-3xl font-bold text-white">EXP Stats Calculator</h1>
+              <h1 className="text-3xl font-bold text-white">EXP Stats Calculator By S3eeD :)</h1>
               <p className="text-blue-200">Process multiple game screenshots and aggregate player statistics</p>
             </div>
           </div>
