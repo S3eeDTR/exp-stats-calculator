@@ -3,7 +3,7 @@
 import { PlayerData, ProcessedImage, AggregatedStats } from '../types/player';
 
 /**
- * If a number has more than 10 digits (i.e. a huge merged value),
+ * If a number has more than 10 digits (i.e. a merged junk string),
  * drop its first 5 digits to recover the true EXP.
  */
 function sanitizeExp(n: number): number {
@@ -18,59 +18,43 @@ export const processImages = async (
   aggregatedPlayers: PlayerData[];
   statistics: AggregatedStats;
 }> => {
-  console.log('Creating FormData with files:', files.map(f => f.name));
-  
-  // 1) Build FormData
+  // 1️⃣ Build FormData
   const formData = new FormData();
-  files.forEach(file => {
-    formData.append('images', file);
-    console.log('  • added', file.name, file.size, 'bytes');
-  });
+  files.forEach(f => formData.append('images', f));
 
-  // 2) Determine backend URL
+  // 2️⃣ POST to your Flask API
   const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-  console.log('Uploading to backend at:', BACKEND);
-
-  // 3) POST to /process
-  const response = await fetch(`${BACKEND}/process`, {
+  const res     = await fetch(`${BACKEND}/process`, {
     method: 'POST',
-    body: formData,
+    body: formData
   });
-  console.log('Response status:', response.status);
-
-  if (!response.ok) {
-    const errText = await response.text();
-    console.error('Upload failed:', errText);
-    throw new Error(`Upload failed: ${response.status} – ${errText}`);
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Upload failed: ${res.status} – ${txt}`);
   }
+  const data = await res.json();
+  if (!data.success) throw new Error(data.error || 'Processing failed');
 
-  // 4) Parse JSON
-  const data = await response.json();
-  console.log('Raw response data:', data);
+  // 3️⃣ Keep the raw per‑image data
+  const processedImages: ProcessedImage[] = data.processed_images;
 
-  if (!data.success) {
-    throw new Error(data.error || 'Processing failed');
-  }
-
-  // 5) Sanitize EXP values in each player record
+  // 4️⃣ Map aggregated players using totalEXP
   const aggregatedPlayers: PlayerData[] = data.aggregated_players.map((p: any) => ({
-    ...p,
-    exp: sanitizeExp(p.exp),
-    totalEXP: sanitizeExp(p.totalEXP ?? p.exp),
+    nickname:      p.nickname,
+    totalEXP:      sanitizeExp(p.totalEXP),
+    appearances:   p.appearances,
+    bestTime:      p.bestTime,
+    timeOverCount: p.timeOverCount,
+    images:        p.images
   }));
 
-  // 6) Sanitize summary statistics
+  // 5️⃣ Sanitize the summary stats
   const statistics: AggregatedStats = {
     uniquePlayers: data.statistics.unique_players,
     totalImages:   data.statistics.total_images,
     totalEXP:      sanitizeExp(data.statistics.total_exp),
-    avgEXP:        sanitizeExp(data.statistics.avg_exp),
+    avgEXP:        sanitizeExp(data.statistics.avg_exp)
   };
 
-  // 7) Return structured result
-  return {
-    processedImages: data.processed_images as ProcessedImage[],
-    aggregatedPlayers,
-    statistics,
-  };
+  return { processedImages, aggregatedPlayers, statistics };
 };
