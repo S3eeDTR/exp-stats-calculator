@@ -8,20 +8,20 @@ from flask_cors import CORS
 import requests
 from werkzeug.utils import secure_filename
 
-# ─── Flask app setup ────────────────────────────────────────────────────────────
+# ─── Flask & CORS Setup ────────────────────────────────────────────────────────
 app = Flask(__name__, template_folder="templates")
+CORS(app)  # Allow all origins
 
 @app.after_request
 def add_cors(resp):
-    # Always add CORS headers
     resp.headers["Access-Control-Allow-Origin"]  = "*"
     resp.headers["Access-Control-Allow-Methods"] = "GET,POST,OPTIONS"
     resp.headers["Access-Control-Allow-Headers"] = "Content-Type,Authorization"
     return resp
 
-# ─── Configuration ──────────────────────────────────────────────────────────────
+# ─── Configuration ─────────────────────────────────────────────────────────────
 OCR_API_URL  = "https://yolo12138-paddle-ocr-api.hf.space/ocr?lang=en"
-MAX_SIZE     = 16 * 1024 * 1024               # 16 MB
+MAX_SIZE     = 16 * 1024 * 1024            # 16 MB
 UPLOAD_DIR   = tempfile.gettempdir()
 ALLOWED_EXTS = {"png","jpg","jpeg","gif","bmp","webp"}
 
@@ -31,17 +31,16 @@ app.config["UPLOAD_FOLDER"]     = UPLOAD_DIR
 def allowed_file(fname: str) -> bool:
     return "." in fname and fname.rsplit(".",1)[1].lower() in ALLOWED_EXTS
 
-# ─── OCR Parsing ────────────────────────────────────────────────────────────────
+# ─── OCR Parsing & Table Extraction ────────────────────────────────────────────
 def extract_table(ocr_data):
     """
-    From OCR JSON, return a list of rows:
-      { nickname: str, tr: int, exp: int, time: str }
-    Splits any cell containing two digit‑runs into TR & EXP.
+    Parse OCR JSON into rows of {nickname, tr, exp, time}.
+    If a single numeric run is longer than 10 digits, drop its first 5 digits.
     """
     lines = defaultdict(list)
     runner_count = 1
 
-    # bucket by Y position
+    # Group OCR items by approximate Y-coordinate bands
     for item in ocr_data:
         y_center = sum(pt[1] for pt in item["boxes"]) / 4
         y_key    = round(y_center / 10) * 10
@@ -56,7 +55,7 @@ def extract_table(ocr_data):
             txt = it["txt"].strip()
             lw  = txt.lower()
 
-            # skip headers/empty
+            # Skip headers/empty
             if lw in {
                 "rank","nickname","time","tr","exp",
                 "points","score","bonus","levelupt",""
@@ -71,30 +70,37 @@ def extract_table(ocr_data):
                 time = txt
                 continue
 
-            # extract all digit‐runs
+            # Extract digit sequences
             nums = re.findall(r"\d+", txt)
             if len(nums) == 2:
+                # Two runs in one cell => TR + EXP
                 tr  = int(nums[0])
                 exp = int(nums[1])
                 continue
             elif len(nums) == 1:
                 n = nums[0]
-                if len(n) <= 5:
-                    tr = int(n)
+                if len(n) > 10:
+                    # Huge merged number: drop first 5 digits
+                    n2  = n[5:]
+                    exp = int(n2)
                 else:
-                    exp = int(n)
+                    # Heuristic by length
+                    if len(n) <= 5:
+                        tr = int(n)
+                    else:
+                        exp = int(n)
                 continue
 
-            # short printable → nickname
+            # Short text => nickname
             if txt.isprintable() and not txt.isdigit() and len(txt) <= 10:
                 nickname = txt
 
-        # fallback name
+        # Fallback runner name
         if not nickname and exp is not None and time is not None:
             nickname = f"runner{runner_count}"
             runner_count += 1
 
-        # only append if complete
+        # Only append fully populated rows
         if nickname and exp is not None and time:
             rows.append({
                 "nickname": nickname,
@@ -113,8 +119,8 @@ class PlayerDataAggregator:
 
     def add_image_data(self, filename, players_data):
         self.processed_images.append({
-            "filename": filename,
-            "players": players_data,
+            "filename":     filename,
+            "players":      players_data,
             "player_count": len(players_data)
         })
         for p in players_data:
@@ -124,7 +130,7 @@ class PlayerDataAggregator:
                 e["totalEXP"]    += ex
                 e["appearances"] += 1
                 e["images"].append(filename)
-                # bestTime logic
+                # Update bestTime
                 if t != "TIME OVER":
                     if e["bestTime"] == "TIME OVER" or t < e["bestTime"]:
                         e["bestTime"] = t
@@ -141,7 +147,7 @@ class PlayerDataAggregator:
                 }
 
     def get_aggregated_data(self):
-        lst = list(self.players.values())
+        lst   = list(self.players.values())
         total = sum(p["totalEXP"] for p in lst)
         return {
             "players": lst,
@@ -161,6 +167,7 @@ def index():
 
 @app.route("/process", methods=["POST","OPTIONS"])
 def process_images():
+    # CORS preflight
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
@@ -168,50 +175,47 @@ def process_images():
         return jsonify({"error":"No images provided"}), 400
 
     files = request.files.getlist("images")
-    if not files or all(f.filename=="" for f in files):
+    if not files or all(f.filename == "" for f in files):
         return jsonify({"error":"No images selected"}), 400
 
     agg, results = PlayerDataAggregator(), []
-
     for i, file in enumerate(files):
         fname = secure_filename(file.filename)
         path  = os.path.join(UPLOAD_DIR, f"temp_{i}_{fname}")
         file.save(path)
 
         try:
-            # send raw to OCR
+            # Send file directly to OCR (no cropping)
             with open(path,"rb") as f:
-                resp = requests.post(
+                ocr_resp = requests.post(
                     OCR_API_URL,
                     headers={"accept":"application/json"},
-                    files={"file":(fname,f,"image/jpeg")}
+                    files={"file": (fname, f, "image/jpeg")}
                 )
-            print(f"OCR status for {fname}: {resp.status_code}")
-            print("OCR resp body:", resp.text)
+            print(f"OCR status for {fname}: {ocr_resp.status_code}")
+            print("OCR response:", ocr_resp.text)
 
-            if resp.status_code != 200:
-                raise RuntimeError(f"OCR API error {resp.status_code}")
+            if ocr_resp.status_code != 200:
+                raise RuntimeError(f"OCR API error {ocr_resp.status_code}")
 
-            ocr_data = resp.json()
+            ocr_data = ocr_resp.json()
             players  = extract_table(ocr_data)
             print(f"Parsed {len(players)} rows for {fname}")
 
             agg.add_image_data(fname, players)
             results.append({
-                "filename": fname,
-                "players":  players,
-                "player_count": len(players)
+                "filename":      fname,
+                "players":       players,
+                "player_count":  len(players)
             })
-
         except Exception as e:
-            print(f"Error on {fname}: {e}")
+            print(f"❌ Error on {fname}: {e}")
             results.append({
-                "filename":     fname,
-                "error":        str(e),
-                "players":      [],
-                "player_count": 0
+                "filename":      fname,
+                "error":         str(e),
+                "players":       [],
+                "player_count":  0
             })
-
         finally:
             os.remove(path)
 
@@ -229,7 +233,6 @@ def process_images():
 def health_check():
     return jsonify({"status":"healthy"})
 
-# ─── Run locally ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT",5000))
     app.run(debug=True, host="0.0.0.0", port=port)
