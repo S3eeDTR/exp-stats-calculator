@@ -134,12 +134,15 @@ def process_images():
                 # Crop & OCR EXP
                 exp_crop = img.crop(boxes["exp"])
                 exp_json = ocr_from_image(exp_crop)
-                exp_txt  = next(
+                exp_txt_raw = next(
                     (it["txt"].replace(",", "") for it in exp_json
                      if it["txt"].strip().isdigit()),
                     "0"
                 )
-                exp_val = int(exp_txt)
+                # If more than 10 digits, drop the first 5
+                if len(exp_txt_raw) > 10:
+                    exp_txt_raw = exp_txt_raw[5:]
+                exp_val = int(exp_txt_raw)
 
                 players_data.append({
                     "nickname": nick_txt,
