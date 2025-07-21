@@ -2,56 +2,54 @@
 
 import { PlayerData, ProcessedImage, AggregatedStats } from '../types/player';
 
-export const processImages = async (
-  files: File[]
-): Promise<{
+/**
+ * Sends the given images to your Flask backend and returns
+ * the raw per‐image details plus aggregated player data.
+ */
+export async function processImages(files: File[]): Promise<{
   processedImages: ProcessedImage[];
   aggregatedPlayers: PlayerData[];
   statistics: AggregatedStats;
-}> => {
-  console.log('Creating FormData with files:', files.map(f => f.name));
+}> {
+  if (!files.length) {
+    throw new Error("No files provided");
+  }
 
-  // 1) Build FormData with the original files (no client‐side cropping)
+  // 1) Build FormData
   const formData = new FormData();
-  files.forEach(file => {
-    formData.append('images', file);
-    console.log(`  • added ${file.name} (${file.size} bytes)`);
-  });
+  files.forEach(f => formData.append("images", f));
 
-  // 2) Determine backend URL
-  const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-  console.log('Uploading to backend at:', BACKEND);
-
-  // 3) POST to /process
-  const response = await fetch(`${BACKEND}/process`, {
-    method: 'POST',
+  // 2) POST to your backend
+  const BACKEND = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
+  const res = await fetch(`${BACKEND}/process`, {
+    method: "POST",
     body: formData,
   });
-  console.log('Response status:', response.status);
-
-  if (!response.ok) {
-    const errText = await response.text();
-    console.error('Upload failed:', errText);
-    throw new Error(`Upload failed: ${response.status} – ${errText}`);
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`Upload failed: ${res.status} – ${txt}`);
   }
 
-  // 4) Parse JSON response
-  const data = await response.json();
-  console.log('Response data:', data);
-
+  // 3) Parse JSON
+  const data = await res.json();
   if (!data.success) {
-    throw new Error(data.error || 'Processing failed');
+    throw new Error(data.error || "Processing failed");
   }
 
-  // 5) Return structured result
-  return {
-    processedImages: data.processed_images as ProcessedImage[],
-    aggregatedPlayers: data.aggregated_players as PlayerData[],
-    statistics: {
-      uniquePlayers: data.statistics.unique_players,
-      totalImages:   data.statistics.total_images,
-      totalEXP:      data.statistics.total_exp,
-      avgEXP:        data.statistics.avg_exp,
-    },
+  // 4) Map to our types
+  const processedImages: ProcessedImage[] = data.processed_images;
+  const aggregatedPlayers: PlayerData[]     = data.aggregated_players.map((p: any) => ({
+    nickname:    p.nickname,
+    totalEXP:    p.totalEXP,
+    appearances: p.appearances,
+    images:      p.images,
+  }));
+  const statistics: AggregatedStats        = {
+    uniquePlayers: data.statistics.unique_players,
+    totalImages:   data.statistics.total_images,
+    totalEXP:      data.statistics.total_exp,
+    avgEXP:        data.statistics.avg_exp,
   };
-};
+
+  return { processedImages, aggregatedPlayers, statistics };
+}
