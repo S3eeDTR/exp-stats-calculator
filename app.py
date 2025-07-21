@@ -19,7 +19,7 @@ app.config.update(
     UPLOAD_FOLDER=UPLOAD_DIR
 )
 
-# ─── Exact pixel boxes for each runner’s nickname & EXP ────────────────────────
+# ─── Pixel‐perfect boxes ────────────────────────────────────────────────────────
 ROW_BOXES = [
     {"nickname": (695, 580, 785, 604), "exp": (932, 575, 991, 610)},
     {"nickname": (695, 615, 785, 643), "exp": (932, 613, 991, 643)},
@@ -31,65 +31,68 @@ ROW_BOXES = [
     {"nickname": (695, 841, 785, 868), "exp": (932, 850, 991, 870)},
 ]
 
-def ocr_from_image(pil_img: Image.Image):
+def safe_ocr_from_image(pil_img: Image.Image):
     """
-    Send a PIL image to the OCR API and return its JSON response.
+    Send a PIL image to the OCR API, return its JSON or [] on any error.
     """
     buf = io.BytesIO()
     pil_img.save(buf, format="JPEG")
     buf.seek(0)
-    resp = requests.post(
-        OCR_API_URL,
-        headers={"accept": "application/json"},
-        files={"file": ("crop.jpg", buf, "image/jpeg")}
-    )
-    resp.raise_for_status()
-    return resp.json()
 
-# ─── Aggregator with dummy time fields ─────────────────────────────────────────
+    try:
+        resp = requests.post(
+            OCR_API_URL,
+            headers={"accept": "application/json"},
+            files={"file": ("crop.jpg", buf, "image/jpeg")},
+            timeout=10
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        # Log but swallow the exception
+        print(f"❌ OCR API failed: {e}")
+        return []
+
+# ─── Aggregator (no time, default fields) ──────────────────────────────────────
 class PlayerDataAggregator:
     def __init__(self):
-        self.players = {}          # nickname → aggregated stats
-        self.processed_images = [] # per-image details
+        self.players = {}
+        self.processed_images = []
 
     def add_image_data(self, filename, players_data):
-        # record per-image result
         self.processed_images.append({
             "filename":     filename,
             "players":      players_data,
             "player_count": len(players_data)
         })
-        # update aggregates
         for p in players_data:
             nick = p["nickname"]
             exp  = p["exp"]
             if nick in self.players:
-                entry = self.players[nick]
-                entry["totalEXP"]    += exp
-                entry["appearances"] += 1
-                entry["images"].append(filename)
+                e = self.players[nick]
+                e["totalEXP"]    += exp
+                e["appearances"] += 1
+                e["images"].append(filename)
             else:
-                # include bestTime and timeOverCount as defaults
                 self.players[nick] = {
                     "nickname":      nick,
                     "totalEXP":      exp,
                     "appearances":   1,
-                    "bestTime":      "",   # no time data
-                    "timeOverCount": 0,    # no time-over
+                    "bestTime":      "",
+                    "timeOverCount": 0,
                     "images":        [filename]
                 }
 
     def get_aggregated_data(self):
-        players_list = list(self.players.values())
-        total_exp    = sum(p["totalEXP"] for p in players_list)
+        lst        = list(self.players.values())
+        total_exp  = sum(p["totalEXP"] for p in lst)
         return {
-            "players": players_list,
+            "players": lst,
             "statistics": {
-                "unique_players": len(players_list),
+                "unique_players": len(lst),
                 "total_images":   len(self.processed_images),
                 "total_exp":      total_exp,
-                "avg_exp":        (total_exp // len(players_list))
-                                   if players_list else 0
+                "avg_exp":        (total_exp // len(lst)) if lst else 0
             },
             "processed_images": self.processed_images
         }
@@ -123,26 +126,26 @@ def process_images():
             players_data = []
 
             for idx, boxes in enumerate(ROW_BOXES, start=1):
-                # Crop & OCR nickname
+                # OCR nickname
                 nick_crop = img.crop(boxes["nickname"])
-                nick_json = ocr_from_image(nick_crop)
+                nick_json = safe_ocr_from_image(nick_crop)
                 nick_txt  = next(
                     (it["txt"].strip() for it in nick_json if it["txt"].strip()),
                     f"runner{idx}"
                 )
 
-                # Crop & OCR EXP
-                exp_crop = img.crop(boxes["exp"])
-                exp_json = ocr_from_image(exp_crop)
-                exp_txt_raw = next(
-                    (it["txt"].replace(",", "") for it in exp_json
-                     if it["txt"].strip().isdigit()),
+                # OCR EXP
+                exp_crop     = img.crop(boxes["exp"])
+                exp_json     = safe_ocr_from_image(exp_crop)
+                raw_exp_txt  = next(
+                    (it["txt"].replace(",", "")
+                     for it in exp_json if it["txt"].strip().isdigit()),
                     "0"
                 )
-                # If more than 10 digits, drop the first 5
-                if len(exp_txt_raw) > 10:
-                    exp_txt_raw = exp_txt_raw[5:]
-                exp_val = int(exp_txt_raw)
+                # strip first 5 digits if >10 length
+                if len(raw_exp_txt) > 10:
+                    raw_exp_txt = raw_exp_txt[5:]
+                exp_val = int(raw_exp_txt)
 
                 players_data.append({
                     "nickname": nick_txt,
@@ -152,12 +155,15 @@ def process_images():
             agg.add_image_data(fname, players_data)
 
         except Exception as e:
+            # in case something really bad happens here
+            print(f"❌ Processing failed for {fname}: {e}")
             agg.processed_images.append({
                 "filename":     fname,
                 "players":      [],
                 "player_count": 0,
                 "error":        str(e)
             })
+
         finally:
             os.remove(path)
 
