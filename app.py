@@ -4,6 +4,8 @@ import tempfile
 from collections import defaultdict
 from flask import Flask, render_template, request, jsonify
 import requests
+import re
+from collections import defaultdict
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__, template_folder='templates')
@@ -32,43 +34,64 @@ def extract_table(ocr_data):
     lines = defaultdict(list)
     runner_count = 1
 
+    # bucket OCR boxes by their vertical position
     for item in ocr_data:
-        y_center = sum(pt[1] for pt in item['boxes'])/4
-        y_key    = round(y_center/10)*10
+        y_center = sum(pt[1] for pt in item["boxes"]) / 4
+        y_key    = round(y_center / 10) * 10
         lines[y_key].append(item)
 
     rows = []
     for y in sorted(lines):
-        line = sorted(lines[y], key=lambda x: x['boxes'][0][0])
-        nickname = exp = time = None
+        line = sorted(lines[y], key=lambda x: x["boxes"][0][0])
+        nickname = tr = exp = time = None
 
-        for it in line:
-            txt = it['txt'].strip()
+        for item in line:
+            txt = item["txt"].strip()
             lw  = txt.lower()
-            if lw in {'nickname','exp','time','tr','rank','points','score','bonus','levelupt',''}:
+
+            # skip headers or empty
+            if lw in {"rank","nickname","time","tr","exp","points","score","bonus","levelupt",""}:
                 continue
-            if lw == 'time over':
-                time = 'TIME OVER'
-            elif ':' in txt and len(txt.split(':'))==3:
+
+            # time detection
+            if lw == "time over":
+                time = "TIME OVER"
+            elif ":" in txt and len(txt.split(":")) == 3:
                 time = txt
-            elif txt.isdigit() and len(txt)>5:
-                exp = int(txt)
-            elif ' ' in txt:
-                for part in txt.split():
-                    if part.isdigit() and len(part)>5:
-                        exp = int(part)
-            elif txt.isprintable() and not txt.isdigit() and len(txt)<=10:
+
+            # numeric detection — grab all digit‑runs
+            nums = re.findall(r"\d+", txt)
+            if len(nums) == 2:
+                # two numbers in one cell → first is TR, second is EXP
+                tr  = int(nums[0])
+                exp = int(nums[1])
+            elif len(nums) == 1:
+                # one number only — decide by length
+                n = nums[0]
+                if len(n) <= 5:
+                    tr = int(n)  # small number → TR
+                else:
+                    exp = int(n)  # big number → EXP
+
+            # anything else shorter, treat as nickname
+            if txt.isprintable() and not txt.isdigit() and len(txt) <= 10 and not nickname:
                 nickname = txt
 
+        # fallback runner name
         if not nickname and exp and time:
-            nickname = f'runner{runner_count}'
+            nickname = f"runner{runner_count}"
             runner_count += 1
 
-        if nickname and exp and time:
-            rows.append({'nickname':nickname,'exp':exp,'time':time})
+        # only append fully populated rows
+        if nickname and exp is not None and time is not None:
+            rows.append({
+                "nickname": nickname,
+                "tr":        tr,
+                "exp":       exp,
+                "time":      time
+            })
 
     return rows
-
 class PlayerDataAggregator:
     def __init__(self):
         self.players = {}
