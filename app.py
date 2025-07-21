@@ -1,92 +1,137 @@
 import os
 import io
 import tempfile
+from collections import defaultdict
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
-from PIL import Image
 import requests
+from PIL import Image
 from werkzeug.utils import secure_filename
 
-# ─── Configuration ─────────────────────────────────────────────────────────────
-OCR_API_URL = "https://yolo12138-paddle-ocr-api.hf.space/ocr?lang=en"
-MAX_SIZE    = 16 * 1024 * 1024  # 16 MB
-UPLOAD_DIR  = tempfile.gettempdir()
-
+# ─── Flask App & CORS Setup ────────────────────────────────────────────────────
 app = Flask(__name__, template_folder="templates")
+# Add CORS headers to all responses
 CORS(app, resources={r"/*": {"origins": "*"}})
-app.config.update(
-    MAX_CONTENT_LENGTH=MAX_SIZE,
-    UPLOAD_FOLDER=UPLOAD_DIR
-)
 
-# ─── Exact pixel boxes for each runner’s nickname & EXP ────────────────────────
-ROW_BOXES = [
-    {"nickname": (695, 580, 785, 604), "exp": (932, 575, 991, 610)},
-    {"nickname": (695, 615, 785, 643), "exp": (932, 613, 991, 643)},
-    {"nickname": (695, 650, 785, 680), "exp": (932, 652, 991, 680)},
-    {"nickname": (695, 688, 785, 721), "exp": (932, 693, 991, 721)},
-    {"nickname": (695, 729, 785, 760), "exp": (932, 735, 991, 760)},
-    {"nickname": (695, 765, 785, 795), "exp": (932, 775, 991, 790)},
-    {"nickname": (695, 805, 785, 835), "exp": (932, 810, 991, 830)},
-    {"nickname": (695, 841, 785, 868), "exp": (932, 850, 991, 870)},
-]
+# ─── Configuration ─────────────────────────────────────────────────────────────
+OCR_API_URL  = "https://yolo12138-paddle-ocr-api.hf.space/ocr?lang=en"
+CROP_BOX     = (700, 530, 1000, 870)        # (left, top, right, bottom)
+MAX_SIZE     = 16 * 1024 * 1024             # 16 MB
+UPLOAD_DIR   = tempfile.gettempdir()
+ALLOWED_EXTS = {"png","jpg","jpeg","gif","bmp","webp"}
 
-def ocr_from_image(pil_img: Image.Image):
+app.config["MAX_CONTENT_LENGTH"] = MAX_SIZE
+app.config["UPLOAD_FOLDER"]     = UPLOAD_DIR
+
+def allowed_file(fname: str) -> bool:
+    return "." in fname and fname.rsplit(".",1)[1].lower() in ALLOWED_EXTS
+
+# ─── OCR Parsing ────────────────────────────────────────────────────────────────
+def extract_table(ocr_data):
     """
-    Send a PIL image to the OCR API and return its JSON response.
+    Parse OCR JSON into rows of {nickname, exp, time}.
     """
-    buf = io.BytesIO()
-    pil_img.save(buf, format="JPEG")
-    buf.seek(0)
-    resp = requests.post(
-        OCR_API_URL,
-        headers={"accept": "application/json"},
-        files={"file": ("crop.jpg", buf, "image/jpeg")}
-    )
-    resp.raise_for_status()
-    return resp.json()
+    lines = defaultdict(list)
+    runner_count = 1
 
-# ─── Aggregator (no time, EXP‑only) ─────────────────────────────────────────────
+    # Group items by approximate Y‑position
+    for item in ocr_data:
+        y_center = sum(pt[1] for pt in item["boxes"]) / 4
+        y_key    = round(y_center / 10) * 10
+        lines[y_key].append(item)
+
+    rows = []
+    for y in sorted(lines):
+        line = sorted(lines[y], key=lambda x: x["boxes"][0][0])
+        nickname = exp = time = None
+
+        for it in line:
+            txt = it["txt"].strip()
+            lw  = txt.lower()
+
+            # Skip headers/empty
+            if lw in {"rank","nickname","time","tr","exp","points","score","bonus","levelupt",""}:
+                continue
+
+            # Time detection
+            if lw == "time over":
+                time = "TIME OVER"
+                continue
+            if ":" in txt and len(txt.split(":")) == 3:
+                time = txt
+                continue
+
+            # EXP detection
+            if txt.isdigit() and len(txt) > 5:
+                exp = int(txt)
+                continue
+            if " " in txt:
+                for part in txt.split():
+                    if part.isdigit() and len(part) > 5:
+                        exp = int(part)
+                        break
+                if exp is not None:
+                    continue
+
+            # Nickname detection
+            if txt.isprintable() and not txt.isdigit() and len(txt) <= 10:
+                nickname = txt
+
+        # Fallback nickname
+        if not nickname and exp is not None and time is not None:
+            nickname = f"runner{runner_count}"
+            runner_count += 1
+
+        # Only append complete rows
+        if nickname and exp is not None and time:
+            rows.append({"nickname": nickname, "exp": exp, "time": time})
+
+    return rows
+
+# ─── Aggregator ────────────────────────────────────────────────────────────────
 class PlayerDataAggregator:
     def __init__(self):
-        self.players = {}         # nickname → aggregated stats
-        self.processed_images = []  # per-image details
+        self.players = {}
+        self.processed_images = []
 
     def add_image_data(self, filename, players_data):
-        # record per-image results
         self.processed_images.append({
-            "filename":     filename,
-            "players":      players_data,
+            "filename": filename,
+            "players": players_data,
             "player_count": len(players_data)
         })
-        # update aggregates
         for p in players_data:
-            nick = p["nickname"]
-            exp  = p["exp"]
+            nick, ex, t = p["nickname"], p["exp"], p["time"]
             if nick in self.players:
-                entry = self.players[nick]
-                entry["totalEXP"]    += exp
-                entry["appearances"] += 1
-                entry["images"].append(filename)
+                e = self.players[nick]
+                e["totalEXP"]    += ex
+                e["appearances"] += 1
+                e["images"].append(filename)
+                if t != "TIME OVER":
+                    if e["bestTime"] == "TIME OVER" or t < e["bestTime"]:
+                        e["bestTime"] = t
+                else:
+                    e["timeOverCount"] += 1
             else:
                 self.players[nick] = {
-                    "nickname":    nick,
-                    "totalEXP":    exp,
-                    "appearances": 1,
-                    "images":      [filename]
+                    "nickname":      nick,
+                    "totalEXP":      ex,
+                    "appearances":   1,
+                    "bestTime":      t,
+                    "timeOverCount": 1 if t == "TIME OVER" else 0,
+                    "images":        [filename]
                 }
 
     def get_aggregated_data(self):
-        players_list = list(self.players.values())
-        total_exp    = sum(p["totalEXP"] for p in players_list)
+        lst   = list(self.players.values())
+        total = sum(p["totalEXP"] for p in lst)
         return {
-            "players": players_list,
+            "players": lst,
             "statistics": {
-                "unique_players": len(players_list),
+                "unique_players": len(lst),
                 "total_images":   len(self.processed_images),
-                "total_exp":      total_exp,
-                "avg_exp":        (total_exp // len(players_list))
-                                   if players_list else 0
+                "total_exp":      total,
+                "avg_exp":        (total // len(lst)) if lst else 0
             },
             "processed_images": self.processed_images
         }
@@ -96,79 +141,76 @@ class PlayerDataAggregator:
 def index():
     return render_template("index.html")
 
-@app.route("/process", methods=["POST", "OPTIONS"])
+@app.route("/process", methods=["POST","OPTIONS"])
 def process_images():
+    # CORS preflight
     if request.method == "OPTIONS":
         return jsonify({}), 200
 
     if "images" not in request.files:
-        return jsonify({"error": "No images provided"}), 400
+        return jsonify({"error":"No images provided"}), 400
 
     files = request.files.getlist("images")
-    if not files or all(f.filename == "" for f in files):
-        return jsonify({"error": "No images selected"}), 400
+    if not files or all(f.filename=="" for f in files):
+        return jsonify({"error":"No images selected"}), 400
 
-    agg = PlayerDataAggregator()
-
-    for file in files:
-        fname = secure_filename(file.filename)
-        path  = os.path.join(UPLOAD_DIR, fname)
+    agg, results = PlayerDataAggregator(), []
+    for i, file in enumerate(files):
+        filename = secure_filename(file.filename)
+        path     = os.path.join(UPLOAD_DIR, f"temp_{i}_{filename}")
         file.save(path)
 
         try:
-            img = Image.open(path).convert("RGB")
-            players_data = []
+            # 1) Open & crop the image
+            with Image.open(path).convert("RGB") as img:
+                cropped = img.crop(CROP_BOX)
+                buffer  = io.BytesIO()
+                cropped.save(buffer, format="JPEG")
+                buffer.seek(0)
 
-            for idx, boxes in enumerate(ROW_BOXES, start=1):
-                # Crop nickname region
-                nick_crop = img.crop(boxes["nickname"])
-                nick_json = ocr_from_image(nick_crop)
-                nick_txt  = next(
-                    (it["txt"].strip() for it in nick_json
-                     if it["txt"].strip()),
-                    f"runner{idx}"
-                )
+            # 2) Send cropped bytes to OCR API
+            resp = requests.post(
+                OCR_API_URL,
+                headers={"accept":"application/json"},
+                files={"file": (filename, buffer, "image/jpeg")}
+            )
+            if resp.status_code != 200:
+                raise RuntimeError(f"OCR API error {resp.status_code}")
 
-                # Crop EXP region
-                exp_crop = img.crop(boxes["exp"])
-                exp_json = ocr_from_image(exp_crop)
-                exp_txt  = next(
-                    (it["txt"].replace(",", "") for it in exp_json
-                     if it["txt"].strip().isdigit()),
-                    "0"
-                )
-                exp_val = int(exp_txt)
-
-                players_data.append({
-                    "nickname": nick_txt,
-                    "exp":      exp_val
-                })
-
-            agg.add_image_data(fname, players_data)
+            ocr_data = resp.json()
+            players  = extract_table(ocr_data)
+            agg.add_image_data(filename, players)
+            results.append({
+                "filename":     filename,
+                "players":      players,
+                "player_count": len(players)
+            })
 
         except Exception as e:
-            agg.processed_images.append({
-                "filename":     fname,
+            print(f"❌ Error processing {filename}: {e}")
+            results.append({
+                "filename":     filename,
+                "error":        str(e),
                 "players":      [],
-                "player_count": 0,
-                "error":        str(e)
+                "player_count": 0
             })
+
         finally:
             os.remove(path)
 
     out = agg.get_aggregated_data()
     return jsonify({
         "success":            True,
-        "processed_images":   out["processed_images"],
+        "processed_images":   results,
         "aggregated_players": out["players"],
         "statistics":         out["statistics"],
-        "total_images":       out["statistics"]["total_images"],
+        "total_images":       len(results),
         "unique_players":     out["statistics"]["unique_players"]
     })
 
 @app.route("/health", methods=["GET"])
 def health_check():
-    return jsonify({"status": "healthy"})
+    return jsonify({"status":"healthy"})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
