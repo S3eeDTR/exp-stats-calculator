@@ -15,13 +15,12 @@ export const processImages = async (files: File[]): Promise<{
 
     console.log('Sending request to Flask server...');
     const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
-    const response = await fetch(`${BACKEND}/process`, { … })
+    const response = await fetch(`${BACKEND}/process`, {
       method: 'POST',
       body: formData,
     });
 
     console.log('Response status:', response.status);
-    
     if (!response.ok) {
       const errorText = await response.text();
       console.error('Response error:', errorText);
@@ -30,7 +29,6 @@ export const processImages = async (files: File[]): Promise<{
 
     const data = await response.json();
     console.log('Response data:', data);
-
     if (!data.success) {
       throw new Error(data.error || 'Processing failed');
     }
@@ -42,7 +40,7 @@ export const processImages = async (files: File[]): Promise<{
         uniquePlayers: data.statistics.unique_players,
         totalImages: data.statistics.total_images,
         totalEXP: data.statistics.total_exp,
-        avgEXP: data.statistics.avg_exp
+        avgEXP: data.statistics.avg_exp,
       }
     };
   } catch (error) {
