@@ -14,7 +14,8 @@ export const processImages = async (files: File[]): Promise<{
     });
 
     console.log('Sending request to Flask server...');
-    const response = await fetch('http://127.0.0.1:5000/process', {
+    const BACKEND = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const response = await fetch(`${BACKEND}/process`, { … })
       method: 'POST',
       body: formData,
     });
