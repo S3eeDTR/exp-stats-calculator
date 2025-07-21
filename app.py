@@ -1,30 +1,27 @@
 import os
-import io
 import json
 import tempfile
 from collections import defaultdict
 from flask import Flask, render_template, request, jsonify
 from flask_cors import CORS
 import requests
-from PIL import Image
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__, template_folder='templates')
-CORS(app)  # Enable CORS for all routes
+CORS(app)  # allow requests from your React app
 
-# Configuration
-OCR_API_URL = "https://yolo12138-paddle-ocr-api.hf.space/ocr?lang=en"
-CROP_BOX    = (700, 530, 1000, 870)   # (left, top, right, bottom)
-MAX_SIZE    = 16 * 1024 * 1024        # 16 MB
-UPLOAD_DIR  = tempfile.gettempdir()
+# Config
+OCR_API_URL  = "https://yolo12138-paddle-ocr-api.hf.space/ocr?lang=en"
+MAX_SIZE     = 16 * 1024 * 1024       # 16 MB
+UPLOAD_DIR   = tempfile.gettempdir()
 ALLOWED_EXTS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp'}
 
 app.config['MAX_CONTENT_LENGTH'] = MAX_SIZE
-app.config['UPLOAD_FOLDER']    = UPLOAD_DIR
+app.config['UPLOAD_FOLDER']     = UPLOAD_DIR
 
 def allowed_file(filename):
     return (
-        '.' in filename and
+        '.' in filename and 
         filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTS
     )
 
@@ -43,7 +40,7 @@ def extract_table(ocr_data):
         nickname = exp = time = None
 
         for item in line:
-            txt = item["txt"].strip()
+            txt   = item["txt"].strip()
             lower = txt.lower()
             if lower in {"nickname","exp","time","tr","rank","points","score","bonus","levelupt",""}:
                 continue
@@ -65,7 +62,7 @@ def extract_table(ocr_data):
             runner_count += 1
 
         if nickname and exp and time:
-            rows.append({"nickname":nickname,"exp":exp,"time":time})
+            rows.append({"nickname": nickname, "exp": exp, "time": time})
 
     return rows
 
@@ -83,15 +80,15 @@ class PlayerDataAggregator:
         for p in players_data:
             nick, exp, t = p['nickname'], p['exp'], p['time']
             if nick in self.players:
-                entry = self.players[nick]
-                entry['totalEXP']    += exp
-                entry['appearances'] += 1
-                entry['images'].append(filename)
+                e = self.players[nick]
+                e['totalEXP']    += exp
+                e['appearances'] += 1
+                e['images'].append(filename)
                 if t != 'TIME OVER':
-                    if entry['bestTime']=='TIME OVER' or t < entry['bestTime']:
-                        entry['bestTime'] = t
+                    if e['bestTime']=='TIME OVER' or t < e['bestTime']:
+                        e['bestTime'] = t
                 else:
-                    entry['timeOverCount'] += 1
+                    e['timeOverCount'] += 1
             else:
                 self.players[nick] = {
                     'nickname': nick,
@@ -104,7 +101,7 @@ class PlayerDataAggregator:
 
     def get_aggregated_data(self):
         players_list = list(self.players.values())
-        total_exp = sum(p['totalEXP'] for p in players_list)
+        total_exp    = sum(p['totalEXP'] for p in players_list)
         return {
             'players': players_list,
             'statistics': {
@@ -129,7 +126,7 @@ def process_images():
     if not files or all(f.filename=='' for f in files):
         return jsonify({'error':'No images selected'}), 400
 
-    agg = PlayerDataAggregator()
+    agg       = PlayerDataAggregator()
     resp_list = []
 
     for idx, file in enumerate(files):
@@ -138,42 +135,31 @@ def process_images():
         file.save(path)
 
         try:
-            # Crop before OCR
-            img = Image.open(path).convert("RGB")
-            cropped = img.crop(CROP_BOX)
-            buf = io.BytesIO()
-            cropped.save(buf, format='JPEG')
-            buf.seek(0)
-
-            # Call OCR API
-            ocr_resp = requests.post(
-                OCR_API_URL,
-                headers={'accept':'application/json'},
-                files={'file': ('cropped.jpg', buf, 'image/jpeg')}
-            )
+            # Send the raw uploaded file (no crop)
+            with open(path, 'rb') as f:
+                ocr_resp = requests.post(
+                    OCR_API_URL,
+                    headers={'accept':'application/json'},
+                    files={'file': (filename, f, 'application/octet-stream')}
+                )
             ocr_data = ocr_resp.json()
 
-            # DEBUG: print raw OCR output
+            # DEBUG: log what came back
             print(f"\n--- OCR results for {filename} ---")
             print(json.dumps(ocr_data, indent=2))
-            print("--- end OCR results ---\n")
+            print("--- end OCR ---\n")
 
-            # Extract table rows
             players = extract_table(ocr_data)
-
-            # DEBUG: print extraction result
             print(f"extract_table found {len(players)} rows for {filename}: {players}\n")
 
-            # Aggregate
             agg.add_image_data(filename, players)
             resp_list.append({
                 'filename': filename,
                 'players':  players,
                 'player_count': len(players)
             })
-
         except Exception as e:
-            print(f"❌ Error processing {filename}:", e)
+            print(f"❌ Error on {filename}:", e)
             resp_list.append({
                 'filename': filename,
                 'error':    str(e),
